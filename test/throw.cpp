@@ -1,10 +1,13 @@
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 int main()
 {
+    std::vector<int> test;
+
     try {
-        throw std::logic_error("dupa");
+        test.at(0);
     } catch (std::exception& e) {
         std::cout << e.what() << std::endl;
     }

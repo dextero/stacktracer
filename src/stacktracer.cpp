@@ -2,6 +2,7 @@
 #include <cxxabi.h>
 #include <signal.h>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include <string>
 #include <cstdio>
@@ -56,16 +57,16 @@ private:
 };
 
 int addr2linePid;
-int addr2lineInFd = -1;
-int addr2lineOutFd = -1;
-FILE* addr2lineIn;
-FILE* addr2lineOut;
+int addr2lineReadFd = -1;
+int addr2lineWriteFd = -1;
+FILE* addr2lineRead;
+FILE* addr2lineWrite;
 
 void initAddr2line() __attribute__((constructor));
 void initAddr2line()
 {
-    constexpr int IN = 0;
-    constexpr int OUT = 1;
+    constexpr int READ = 0;
+    constexpr int WRITE = 1;
 
     AutoDescriptor addrPipe[2];
     AutoDescriptor linePipe[2];
@@ -80,52 +81,70 @@ void initAddr2line()
         abort();
     case 0:
         {
-            if (dup2(addrPipe[IN].get(), 0)
-                    || dup2(linePipe[OUT].get(), 1)) {
+            if (dup2(addrPipe[READ].release(), 0) < 0
+                    || dup2(linePipe[WRITE].release(), 1) < 0) {
+                fprintf(stderr, "child: dup2 failed\n");
                 abort();
             }
 
-            char addr2lineCmd[] = "addr2line";
+            char addr2lineCmd[] = "/usr/bin/addr2line";
             char addr2lineArg[] = "-Capfe";
             char* argv[] {
                 addr2lineCmd, 
                 addr2lineArg,
-                program_invocation_name
+                program_invocation_name,
+                NULL
             };
             execve(argv[0], argv, NULL);
+            perror("child: execve failed");
             abort();
         }
     default:
-        addr2lineInFd = addrPipe[IN].release();
-        addr2lineIn = fdopen(addr2lineInFd, "r");
-        addr2lineOutFd = linePipe[OUT].release();
-        addr2lineOut = fdopen(addr2lineOutFd, "w");
+        addr2lineWriteFd = addrPipe[WRITE].release();
+        addr2lineWrite = fdopen(addr2lineWriteFd, "w");
+        addr2lineReadFd = linePipe[READ].release();
+        addr2lineRead = fdopen(addr2lineReadFd, "r");
         break;
     }
 }
 
-std::string demangle(const char* symbol) {
+std::string demangle(void* addr,
+                     const char* symbol) {
     size_t size;
     int status;
-    char temp[1024];
+    char file[1024] = "";
+    char source[1024] = "";
+    char addr_str[21] = "";
+    char offset[32] = "";
     char* demangled;
 
+    snprintf(addr_str, sizeof(addr_str), "0x%016" PRIxPTR ": ", (uintptr_t)addr);
+    std::string result;
+
     //first, try to demangle a c++ name
-    if (sscanf(symbol, "%*[^(]%*[^_]%127[^)+]", temp) == 1) {
-        if (NULL != (demangled = abi::__cxa_demangle(temp, NULL, &size, &status))) {
-            std::string result(demangled);
+    if (sscanf(symbol, "%1023[^(](%1023[^)+]+%31[^)]", file, source, offset) >= 2) {
+        if (NULL != (demangled = abi::__cxa_demangle(source, NULL, &size, &status))) {
+            result = demangled;
             free(demangled);
-            return result;
+        } else {
+            result = *offset ? offset : "??";
         }
+
+        return addr_str + result + " at " + file;
+    }
+
+    if (sscanf(symbol, "%1023[^(](+%31[^)]", file, offset) == 2) {
+        return std::string(addr_str) + offset + " at " + file;
     }
 
     //if that didn't work, try to get a regular c symbol
-    if (1 == sscanf(symbol, "%127s", temp)) {
-        return temp;
+    printf("sscanf 2\n");
+    if (sscanf(symbol, "%1023s", source) == 1) {
+        return std::string(addr_str) + source;
     }
 
     //if all else fails, just return the symbol
-    return symbol;
+    return std::string(addr_str) + symbol;
 }
 
 std::vector<void*> get_stack_trace_addrs()
@@ -154,11 +173,12 @@ bool is_own_symbol(const char* symbol) {
 }
 
 std::string addr2line(void* addr) {
-    fprintf(addr2lineIn, "%p\n", addr);
+    fprintf(addr2lineWrite, "%p\n", addr);
+    fflush(addr2lineWrite);
 
     char* line_ptr = nullptr;
     size_t size = 0;
-    if (getline(&line_ptr, &size, addr2lineOut) < 0) {
+    if (getline(&line_ptr, &size, addr2lineRead) < 0) {
         return "<addr2line failed>";
     }
 
@@ -176,9 +196,11 @@ std::vector<StackFrame> get_trace_symbols(const std::vector<void*>& addrs)
 
     std::vector<StackFrame> frames;
     for (size_t i = 0; i < addrs.size(); ++i) {
-        frames.push_back({ addrs[i],
-                           is_own_symbol(symbols[i]) ? addr2line(addrs[i])
-                                                     : demangle(symbols[i]) });
+        if (is_own_symbol(symbols[i])) {
+            frames.push_back({ addrs[i], addr2line(addrs[i]) });
+        } else {
+            frames.push_back({ addrs[i], demangle(addrs[i], symbols[i]) });
+        }
     }
 
     return frames;
@@ -273,7 +295,8 @@ std::string get_stack_trace_string(const std::vector<StackFrame>& frames) {
 namespace std {
 
 #define DECLARE_EXCEPTION(Name) \
-    Name::Name(const std::string& what): _M_msg(what + "\n" + get_stack_trace_string(get_stack_trace())) {}
+    Name::Name(const std::string& what): \
+        _M_msg(#Name ": " + what + "\n" + get_stack_trace_string(get_stack_trace())) {}
 
 DECLARE_EXCEPTION(logic_error)
 DECLARE_EXCEPTION(runtime_error)
