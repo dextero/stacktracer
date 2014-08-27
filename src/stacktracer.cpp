@@ -273,7 +273,7 @@ extern "C" {
 
 std::vector<StackFrame> get_stack_trace()
 {
-    constexpr size_t ENTRIES_TO_SKIP = 0;
+    constexpr size_t ENTRIES_TO_SKIP = 3;
 
     std::vector<void*> addrs = get_stack_trace_addrs();
     std::copy(addrs.begin() + ENTRIES_TO_SKIP, addrs.end(), addrs.begin());
@@ -283,9 +283,11 @@ std::vector<StackFrame> get_stack_trace()
 std::string get_stack_trace_string(const std::vector<StackFrame>& frames) {
     std::stringstream ss;
 
+    ss << "----- STACK TRACE -----" << std::endl;
     for (const StackFrame& frame: frames) {
         ss << frame.name << std::endl;
     }
+    ss << "-----------------------" << std::endl;
 
     return ss.str();
 }
