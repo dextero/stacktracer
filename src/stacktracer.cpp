@@ -29,13 +29,16 @@ public:
     ~AutoDescriptor() { close(); }
 
     int get() const { return fd; }
-    int release() {
+
+    int release()
+    {
         int ret = fd;
         fd = -1;
         return ret;
     }
 
-    void close() {
+    void close()
+    {
         while (fd >= 0) {
             if (!::close(fd)) {
                 fd = -1;
@@ -43,13 +46,15 @@ public:
         }
     }
 
-    AutoDescriptor& operator =(int newFd) {
+    AutoDescriptor& operator =(int newFd)
+    {
         if (fd == newFd) {
             return *this;
         }
 
         close();
         fd = newFd;
+        return *this;
     }
 
 private:
@@ -109,7 +114,8 @@ void initAddr2line()
 }
 
 std::string demangle(void* addr,
-                     const char* symbol) {
+                     const char* symbol)
+{
     size_t size;
     int status;
     char file[1024] = "";
@@ -157,7 +163,8 @@ std::vector<void*> get_stack_trace_addrs()
     return addrs;
 }
 
-bool is_own_symbol(const char* symbol) {
+bool is_own_symbol(const char* symbol)
+{
     const char* sym = symbol;
     const char* prog = program_invocation_name;
 
@@ -172,7 +179,8 @@ bool is_own_symbol(const char* symbol) {
     return *sym == '(';
 }
 
-std::string addr2line(void* addr) {
+std::string addr2line(void* addr)
+{
     fprintf(addr2lineWrite, "%p\n", addr);
     fflush(addr2lineWrite);
 
@@ -280,7 +288,8 @@ std::vector<StackFrame> get_stack_trace()
     return get_trace_symbols(addrs);
 }
 
-std::string get_stack_trace_string(const std::vector<StackFrame>& frames) {
+std::string get_stack_trace_string(const std::vector<StackFrame>& frames)
+{
     std::stringstream ss;
 
     ss << "----- STACK TRACE -----" << std::endl;
