@@ -1,4 +1,20 @@
-#include <execinfo.h>
+#if __GNU_LIBRARY__
+#   include <execinfo.h>
+#else
+#   include <features.h>
+
+extern "C" {
+
+int backtrace (void **__array,
+               int __size) __nonnull ((1));
+
+char **backtrace_symbols (void *const *__array,
+                          int __size) __THROW __nonnull ((1));
+
+} // extern "C"
+
+#endif
+
 #include <cxxabi.h>
 #include <signal.h>
 #include <unistd.h>
@@ -7,6 +23,7 @@
 #include <string>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 #include <vector>
 #include <string>
@@ -14,12 +31,15 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <fstream>
 
 #include "stacktracer.h"
 
 #define MAX_TRACE_LEVELS 256
 
-extern char* program_invocation_name;
+#ifndef PRIu64
+#   define PRIu64 "llu"
+#endif // PRIu64
 
 namespace {
 
@@ -67,9 +87,27 @@ int addr2lineWriteFd = -1;
 FILE* addr2lineRead;
 FILE* addr2lineWrite;
 
+char* program_invocation_name = NULL;
+
+void initProgramInvocationName()
+{
+    std::ifstream file("/proc/self/cmdline");
+    if (!file.is_open()) {
+        fprintf(stderr, "cannot open /proc/self/cmdline");
+        _exit(1);
+    }
+
+    static char buffer[256] = "";
+    file.read(buffer, sizeof(buffer) - 1);
+
+    program_invocation_name = buffer;
+}
+
 void initAddr2line() __attribute__((constructor));
 void initAddr2line()
 {
+    initProgramInvocationName();
+
     constexpr int READ = 0;
     constexpr int WRITE = 1;
 
@@ -78,18 +116,18 @@ void initAddr2line()
 
     if (pipe((int*)addrPipe)
             || pipe((int*)linePipe)) {
-        abort();
+        _exit(1);
     }
 
     switch (addr2linePid = fork()) {
     case -1:
-        abort();
+        _exit(1);
     case 0:
         {
             if (dup2(addrPipe[READ].release(), 0) < 0
                     || dup2(linePipe[WRITE].release(), 1) < 0) {
                 fprintf(stderr, "child: dup2 failed\n");
-                abort();
+                _exit(1);
             }
 
             char addr2lineCmd[] = "/usr/bin/addr2line";
@@ -102,7 +140,7 @@ void initAddr2line()
             };
             execve(argv[0], argv, NULL);
             perror("child: execve failed");
-            abort();
+            _exit(1);
         }
     default:
         addr2lineWriteFd = addrPipe[WRITE].release();
@@ -111,6 +149,8 @@ void initAddr2line()
         addr2lineRead = fdopen(addr2lineReadFd, "r");
         break;
     }
+
+    fprintf(stderr, "stacktracer: init done\n");
 }
 
 std::string demangle(void* addr,
@@ -124,7 +164,7 @@ std::string demangle(void* addr,
     char offset[32] = "";
     char* demangled;
 
-    snprintf(addr_str, sizeof(addr_str), "0x%016" PRIxPTR ": ", (uintptr_t)addr);
+    snprintf(addr_str, sizeof(addr_str), "0x%016" PRIu64 ": ", (uint64_t)(uintptr_t)addr);
     std::string result;
 
     //first, try to demangle a c++ name
@@ -184,7 +224,7 @@ std::string addr2line(void* addr)
     fprintf(addr2lineWrite, "%p\n", addr);
     fflush(addr2lineWrite);
 
-    char* line_ptr = nullptr;
+    char* line_ptr = NULL;
     size_t size = 0;
     if (getline(&line_ptr, &size, addr2lineRead) < 0) {
         return "<addr2line failed>";
@@ -205,9 +245,9 @@ std::vector<StackFrame> get_trace_symbols(const std::vector<void*>& addrs)
     std::vector<StackFrame> frames;
     for (size_t i = 0; i < addrs.size(); ++i) {
         if (is_own_symbol(symbols[i])) {
-            frames.push_back({ addrs[i], addr2line(addrs[i]) });
+            frames.push_back(StackFrame{ addrs[i], addr2line(addrs[i]) });
         } else {
-            frames.push_back({ addrs[i], demangle(addrs[i], symbols[i]) });
+            frames.push_back(StackFrame{ addrs[i], demangle(addrs[i], symbols[i]) });
         }
     }
 
@@ -223,6 +263,8 @@ void fix_stack_trace(ucontext_t* context,
     caller_address = (void*)context->uc_mcontext.gregs[REG_EIP]; // EIP: x86 specific
 #elif defined(__x86_64__) // gcc specific
     caller_address = (void*)context->uc_mcontext.gregs[REG_RIP]; // RIP: x86_64 specific
+#elif defined(__mips__)
+    caller_address = (void*)context->uc_mcontext.gregs[31]; // RA: MIPS-specific
 #else
 #error Unsupported architecture. // TODO: Add support for other arch.
 #endif
@@ -257,7 +299,7 @@ void signal_handler(int sigNum,
         DEFAULT_SIGNAL_HANDLERS[sigNum].sa_handler(sigNum);
     }
 
-    abort();
+    _exit(1);
 }
 
 void init_signal_handlers() __attribute__((constructor));
@@ -270,7 +312,12 @@ void init_signal_handlers()
     sa.sa_flags = SA_RESTART | SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
 
-    for (int sig: { SIGINT, SIGTERM, SIGHUP, SIGSEGV, SIGFPE }) {
+    static const std::vector<int> SIGNALS {
+        SIGINT, SIGTERM, SIGHUP, SIGSEGV, SIGFPE, SIGABRT
+    };
+
+    for (size_t i = 0; i < SIGNALS.size(); ++i) {
+        int sig = SIGNALS[i];
         sigaction(sig, &sa, &DEFAULT_SIGNAL_HANDLERS[sig]);
     }
 }
@@ -293,8 +340,8 @@ std::string get_stack_trace_string(const std::vector<StackFrame>& frames)
     std::stringstream ss;
 
     ss << "----- STACK TRACE -----" << std::endl;
-    for (const StackFrame& frame: frames) {
-        ss << frame.name << std::endl;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        ss << frames[i].name << std::endl;
     }
     ss << "-----------------------" << std::endl;
 

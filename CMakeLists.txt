@@ -1,6 +1,4 @@
 cmake_minimum_required(VERSION 2.8.5)
-set(CMAKE_CXX_COMPILER g++)
-
 project(stacktracer)
 
 file(GLOB CUSTOM_MODULES "${CMAKE_SOURCE_DIR}/cmake/*")
@@ -38,9 +36,12 @@ find_sources(CXX_SOURCES ${ROOT_DIR}/src ".cpp" "src")
 set(SOURCES ${HEADERS}
             ${CXX_SOURCES})
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -std=c++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -std=c++0x")
 
 add_library(stacktracer SHARED ${SOURCES})
 if(LIBS)
     target_link_libraries(stacktracer ${LIBS})
 endif()
+
+install(TARGETS stacktracer DESTINATION usr/lib)
+
